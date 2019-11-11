@@ -1,0 +1,245 @@
+---
+title: "Lab 7 521 F19"
+date: "11/5/2019"
+output: html_document
+---
+
+# Implementing Treed Regression
+
+We want to compare the various frameworks that exist for fitting tree based models. Two popular packages are XGBoost and GBM. Our focus here is not only in prediction accuracy and the assessment of our models, but also in the computation time. Tree models are popular on massive datasets, and while our example data are relatively small, we can imagine the scaling to big n or big p.
+
+```{r packages}
+library(xgboost)
+library(gbm)
+library(MASS)
+```
+
+```{r data}
+set.seed(521)
+attach(Boston)
+bos = Boston
+
+train.ind = sample.int(nrow(bos), round(nrow(bos) * 4/5))
+bos.train = bos[train.ind,]
+bos.test = bos[-train.ind,]
+```
+
+```{r rmse}
+rmse = function(pred, true){
+  return(sqrt(mean((pred - true)^2)))
+}
+```
+
+
+As a baseline we might consider a linear model.
+
+```{r ols}
+time.lin = system.time({
+  mod.lin = lm(medv ~ ., bos.train)
+})
+
+summary(mod.lin)
+
+pred.lin = predict(mod.lin, bos.test)
+rmse.lin = rmse(pred.lin, bos.test$medv)
+rmse.lin
+
+plot(pred.lin ~ bos.test$medv)
+abline(0, 1)
+```
+
+What does this plot tell you? Consider the assumptions in linear regression.
+
+
+
+
+
+
+Next we consider a tree regression model using GBM. Try tweaking the interaction depth and number of trees for the effect on runtime.
+
+```{r gbm}
+time.gbm = system.time({
+  mod.gbm = gbm(medv ~ ., data = bos.train, distribution = "gaussian",
+                n.trees=5000, interaction.depth=4)
+})
+
+summary(mod.gbm)
+
+pred.gbm = predict(mod.gbm, bos.test, n.trees = 5000)
+rmse.gbm = rmse(pred.gbm, bos.test$medv)
+rmse.gbm
+
+plot(pred.gbm ~ bos.test$medv)
+abline(0, 1)
+```
+
+Compare the output with the linear model. How do these models differ? What does this plot tell you about the true data generating process?
+
+
+
+
+
+
+
+
+
+
+
+Now we fit the same(ish) model in XGBoost. We will specify the same tree structure, but the models differ slightly in their regularization terms. Thus in practice if a tree model is a natural fit for the data, trying multiple platforms is worthwhile.
+
+```{r xgboost}
+mat.train = as.matrix(bos.train[,-14])
+lab.train = bos.train$medv
+
+time.xgb = system.time({
+  mod.xgb = xgboost(params = list(max_depth = 4), nrounds = 5000,
+                    data = mat.train, label = lab.train,
+                    print_every_n = 1000L)
+})
+
+xgb.plot.importance(xgb.importance(model = mod.xgb))
+
+mat.test = as.matrix(bos.test[,-14])
+pred.xgb = predict(mod.xgb, mat.test)
+rmse.xgb = rmse(pred.xgb, bos.test$medv)
+rmse.xgb
+
+plot(pred.xgb ~ bos.test$medv)
+abline(0, 1)
+```
+
+Compare the models. Consider the accuracy of the predictions, the inference possible, the assumptions made, and the computation time. Did we overfit or underfit? Try changing model parameters and recomputing the diagnostics.
+
+
+
+
+
+
+
+
+
+
+Maybe all of our models are valuable. Their predictions are all slightly different, so we might try an ensemble model comprised of the three predictions.
+
+```{r}
+pred.all = (pred.lin + pred.gbm + pred.xgb)/3
+rmse.all = rmse(pred.all, bos.test$medv)
+rmse.all
+
+plot(pred.all ~ bos.test$medv)
+abline(0, 1)
+```
+
+Discuss the result.
+
+
+
+
+
+
+## LASSO discussion
+
+There was a lot of confusion about the LASSO prediction intervals, primarily because there is no accepted rigerous method for generating such intervals. Bootstraping works to estimate parameter uncertainty, but often underestimates standard error and does not account for the bias inherent in the regularization. One way of generating intervals using a LASSO penalty that are fit to the data directly is through penalized quantile regression. Here we use a modified loss function, and a similar regularization or penalty. Where L2 (quadratic) loss results normal mean regression, L1 (absolute) loss results in median regression (or 0.5 quantile regression). For an approximation to our 95% prediction interval in this regularized environment, for a chosen lambda (penalty weight) we might perform a penalized quantile regression for the 0.025 and 0.975 quantiles.
+
+We can do this using the `rqPen` package.
+
+```{r install, eval = FALSE}
+install.packages("rqPen")
+```
+
+
+```{r rqPen}
+library(glmnet)
+library(rqPen)
+reg.mean = glmnet::cv.glmnet(x = mat.train, y = lab.train)
+pred.lasso = predict(reg.mean, mat.test, s = "lambda.min")
+plot(pred.lasso ~ bos.test$medv)
+abline(0, 1)
+
+reg.LCI = rqPen::cv.rq.pen(y = lab.train,  x = mat.train, tau = 0.025)
+low.lasso = predict(reg.LCI, mat.test)
+
+reg.HCI = cv.rq.pen(y = lab.train,  x = mat.train, tau = 0.975)
+high.lasso = predict(reg.HCI, mat.test)
+
+mean((bos.test$medv < high.lasso) & (bos.test$medv > low.lasso))
+```
+
+
+```{r lassoplot}
+lasso.int = data.frame(ind = 1:101, actual = bos.test$medv,
+                       pred = as.vector(pred.lasso), high = high.lasso,
+                       low = low.lasso)
+
+plot(pred ~ ind, lasso.int, ylim = c(0, 70), ylab = "value",  xlab = "index")
+arrows(x0 = lasso.int$ind, y0 = lasso.int$low, y1 = lasso.int$high, 
+       angle = 180, length = 0)
+points(lasso.int$ind, lasso.int$actual, pch = 20, col = "red")
+
+```
+
+## Bonus: Catboosting
+
+The machine learning world is constantly evolving, and while XGBoost and the GBM package are still popular tools, there are always new competitors. Many of these competitors are not CRAN approved, so here we will try installing a new package from github that promises great results using a model that we are by now familiar with. See https://catboost.ai/ for performance claims.
+
+```{r installCATBOOST, eval = FALSE}
+# DO NOT RUN LOCALLY!!! unless you're on a linux system, you will need to copy the correct url from "https://github.com/catboost/catboost/releases" (note: "darwin" means macOS)
+
+#Linux  uncomment
+#devtools::install_url("https://github.com/catboost/catboost/releases/download/v0.18.1/catboost-R-Linux-0.18.1.tgz", args = c("--no-multiarch"))
+
+# Mac version  uncomment
+# devtools::install_url("https://github.com/catboost/catboost/releases/download/v0.18.1/catboost-R-Darwin-0.18.1.tgz")
+
+```
+
+We must wrap the data to send it to the model training function.
+
+```{r catboost}
+library(catboost)
+train.pool = catboost.load_pool(data = mat.train, label = lab.train)
+
+time.cat = system.time({
+  mod.cat = catboost.train(train.pool, params = list(iterations = 5000, 
+                                                   depth = 4, 
+                                                   verbose = 1000L))
+})
+
+test.pool = catboost.load_pool(data = mat.test)
+pred.cat = catboost.predict(mod.cat, pool = test.pool)
+rmse.cat = rmse(pred.cat, bos.test$medv)
+rmse.cat
+
+plot(pred.cat ~ bos.test$medv)
+abline(0, 1)
+```
+
+and to reconsider our ensemble:
+
+```{r}
+pred.all = 0.75 * pred.all + 0.25 * pred.cat
+
+rmse.all = rmse(pred.all, bos.test$medv)
+rmse.all
+
+plot(pred.all ~ bos.test$medv)
+abline(0, 1)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
